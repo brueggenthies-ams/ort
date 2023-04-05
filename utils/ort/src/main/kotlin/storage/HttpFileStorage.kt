@@ -19,21 +19,20 @@
 
 package org.ossreviewtoolkit.utils.ort.storage
 
-import java.io.IOException
-import java.io.InputStream
-import java.time.Duration
-import java.util.concurrent.TimeUnit
-
 import okhttp3.CacheControl
 import okhttp3.ConnectionPool
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-
+import okhttp3.Response
+import okio.use
 import org.apache.logging.log4j.kotlin.Logging
-
 import org.ossreviewtoolkit.utils.ort.OkHttpClientHelper
 import org.ossreviewtoolkit.utils.ort.execute
+import java.io.IOException
+import java.io.InputStream
+import java.time.Duration
+import java.util.concurrent.TimeUnit
 
 private const val HTTP_CLIENT_CONNECT_TIMEOUT_IN_SECONDS = 30L
 private const val HTTP_CLIENT_KEEP_ALIVE_DURATION_IN_SECONDS = 1 * 60L
@@ -118,24 +117,65 @@ class HttpFileStorage(
     }
 
     override fun write(path: String, inputStream: InputStream) {
-        inputStream.use {
-            val request = Request.Builder()
-                .headers(headers.toHeaders())
-                .put(it.readBytes().toRequestBody())
-                .url(urlForPath(path))
-                .build()
+        val data: ByteArray = inputStream.use { it.readBytes() }
 
-            logger.debug { "Writing file to storage: ${request.url}" }
+        val request = Request.Builder()
+            .headers(headers.toHeaders())
+            .put(data.toRequestBody())
+            .url(urlForPath(path))
+            .build()
 
-            return httpClient.execute(request).use { response ->
-                if (!response.isSuccessful) {
-                    throw IOException(
-                        "Could not store file at '${request.url}': ${response.code} - ${response.message}"
-                    )
+        logger.debug { "Writing file to storage: ${request.url}" }
+
+        httpClient.execute(request).use { response ->
+            if (!response.isSuccessful) {
+                // Check if Error is 404. Then create directories and retry it
+                if (response.code == 404) {
+                    logger.debug { "Writing failed with error 404. Retrying after MKCOL" }
+                    writeWithWebDav(path, data)
+                } else {
+                    throwWriteError(request, response)
                 }
             }
         }
     }
+
+    private fun writeWithWebDav(path: String, data: ByteArray) {
+        createCollections(path)
+        val request = Request.Builder()
+            .headers(headers.toHeaders())
+            .put(data.toRequestBody())
+            .url(urlForPath(path))
+            .build()
+        httpClient.execute(request).use { response ->
+            if (!response.isSuccessful) {
+                throwWriteError(request, response)
+            }
+        }
+    }
+
+    private fun createCollections(path: String) {
+        var collectionPath = ""
+        // MKCOL does not work for nested collections at once
+        path.split("/").dropLast(1).forEach {
+            collectionPath = "$collectionPath$it/"
+            logger.debug { "Calling MKCOL for ${urlForPath(collectionPath)}" }
+            val request = Request.Builder()
+                .headers(headers.toHeaders())
+                .method("MKCOL", null)
+                .url(urlForPath(newPath))
+                .build()
+            httpClient.execute(request).use {
+                logger.debug { "MKCOL result: ${it.code}" }
+            }
+        }
+    }
+
+    private fun throwWriteError(request: Request, response: Response): Nothing {
+        throw IOException("Could not store file at '${request.url}': ${response.code} - ${response.message}")
+    }
+
+    private fun String.encodeForHttp() = replace("%2F", "%252F") // HTTP spec does not support encoded slashes
 
     private fun urlForPath(path: String) = "$url/$path$query"
 }
