@@ -93,11 +93,13 @@ class HttpFileStorage(
     }
 
     override fun read(path: String): InputStream {
+        val httpPath = path.encodeForHttp()
+
         val request = Request.Builder()
             .headers(headers.toHeaders())
             .cacheControl(CacheControl.Builder().maxAge(cacheMaxAgeInSeconds, TimeUnit.SECONDS).build())
             .get()
-            .url(urlForPath(path))
+            .url(urlForPath(httpPath))
             .build()
 
         logger.debug { "Reading file from storage: ${request.url}" }
@@ -117,12 +119,13 @@ class HttpFileStorage(
     }
 
     override fun write(path: String, inputStream: InputStream) {
+        val httpPath = path.encodeForHttp()
         val data: ByteArray = inputStream.use { it.readBytes() }
 
         val request = Request.Builder()
             .headers(headers.toHeaders())
             .put(data.toRequestBody())
-            .url(urlForPath(path))
+            .url(urlForPath(httpPath))
             .build()
 
         logger.debug { "Writing file to storage: ${request.url}" }
@@ -131,8 +134,8 @@ class HttpFileStorage(
             if (!response.isSuccessful) {
                 // Check if Error is 404. Then create directories and retry it
                 if (response.code == 404) {
-                    logger.debug { "Writing failed with error 404. Retrying after MKCOL" }
-                    writeWithWebDav(path, data)
+                    logger.info { "Writing failed with error 404. Retrying after MKCOL" }
+                    writeWithWebDav(httpPath, data)
                 } else {
                     throwWriteError(request, response)
                 }
@@ -163,7 +166,7 @@ class HttpFileStorage(
             val request = Request.Builder()
                 .headers(headers.toHeaders())
                 .method("MKCOL", null)
-                .url(urlForPath(newPath))
+                .url(urlForPath(collectionPath))
                 .build()
             httpClient.execute(request).use {
                 logger.debug { "MKCOL result: ${it.code}" }
